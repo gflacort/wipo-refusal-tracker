@@ -108,6 +108,59 @@ def download_csv():
     )
 
 
+@app.route("/cron-run", methods=["GET", "POST"])
+def cron_run():
+    """Single-shot automation endpoint.
+
+    Hit this URL (GET or POST) with the header ``X-Cron-Token`` (or
+    ``?token=...``) matching the ``CRON_TOKEN`` env var, and the app will:
+        1. Fetch the last N days of refusals from WIPO
+        2. Append the fresh ones to the configured Google Sheet
+
+    Designed to be called by GitHub Actions (or any cron service) on a
+    weekly schedule so no one has to open the UI.
+    """
+    expected = os.environ.get("CRON_TOKEN")
+    if not expected:
+        return jsonify(error="CRON_TOKEN env var not set on Render"), 500
+
+    provided = (
+        request.headers.get("X-Cron-Token")
+        or request.args.get("token")
+        or (request.get_json(silent=True) or {}).get("token")
+    )
+    if provided != expected:
+        return jsonify(error="unauthorized"), 401
+
+    days = int(request.args.get("days", 7))
+
+    try:
+        rows, source = fetch_latest_refusals(days=days)
+    except Exception as exc:
+        return jsonify(error=str(exc), stage="fetch"), 500
+
+    _LAST_RESULTS["fetched_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    _LAST_RESULTS["rows"] = rows
+    _LAST_RESULTS["source"] = source
+
+    sheet_id = os.environ.get("GOOGLE_SHEET_ID")
+    if not sheet_id:
+        return jsonify(error="GOOGLE_SHEET_ID not set", fetched=len(rows)), 500
+
+    try:
+        appended = push_to_sheet(sheet_id, rows)
+    except Exception as exc:
+        return jsonify(error=str(exc), stage="sheets", fetched=len(rows)), 500
+
+    return jsonify(
+        ok=True,
+        fetched=len(rows),
+        appended_to_sheet=appended,
+        source=source,
+        at=_LAST_RESULTS["fetched_at"],
+    )
+
+
 @app.route("/healthz")
 def healthz():
     """Render's health check endpoint."""

@@ -1,0 +1,48 @@
+name: Weekly WIPO refusal fetch
+
+on:
+  schedule:
+    # Fridays at 10:00 UTC (day after the Gazette publishes on Thursdays)
+    - cron: "0 10 * * 5"
+  # Lets you also run it on demand from the Actions tab
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "How many days back to fetch"
+        required: false
+        default: "7"
+
+jobs:
+  fetch:
+    name: Trigger Render /cron-run
+    runs-on: ubuntu-latest
+    steps:
+      - name: POST to the app
+        env:
+          RENDER_URL: ${{ secrets.RENDER_URL }}
+          CRON_TOKEN: ${{ secrets.CRON_TOKEN }}
+          DAYS: ${{ github.event.inputs.days || '7' }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RENDER_URL:-}" ] || [ -z "${CRON_TOKEN:-}" ]; then
+            echo "Missing RENDER_URL or CRON_TOKEN secret — add them under Settings → Secrets → Actions."
+            exit 1
+          fi
+
+          echo "Calling ${RENDER_URL}/cron-run?days=${DAYS}"
+          http_status=$(curl -sS -o response.json -w "%{http_code}" \
+            -X POST "${RENDER_URL}/cron-run?days=${DAYS}" \
+            -H "X-Cron-Token: ${CRON_TOKEN}" \
+            --max-time 300)
+
+          echo "HTTP status: ${http_status}"
+          echo "Response:"
+          cat response.json || true
+          echo
+
+          if [ "${http_status}" != "200" ]; then
+            echo "::error::cron-run failed (HTTP ${http_status})"
+            exit 1
+          fi
+
+          echo "::notice::Weekly WIPO fetch completed."
