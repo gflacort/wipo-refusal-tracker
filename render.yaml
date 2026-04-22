@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: wipo-refusal-tracker
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "gunicorn server:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120"
+    healthCheckPath: /healthz
+    envVars:
+      - key: FLASK_SECRET
+        generateValue: true
+      - key: GOOGLE_SHEET_ID
+        sync: false        # set this in the Render dashboard
+      - key: GOOGLE_SHEET_TAB
+        value: Refusals
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false        # paste your service account JSON in the dashboard
+      - key: WIPO_SAMPLE_MODE
+        value: "0"         # set to "1" to preview the UI with fixture data
