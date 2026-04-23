@@ -2,47 +2,97 @@ name: Diagnose WIPO FTP
 
 on:
   workflow_dispatch:
+    inputs:
+      filename:
+        description: "Which daily zip to inspect (YYYYMMDD.zip)"
+        required: false
+        default: "20260421.zip"
 
 jobs:
   inspect:
-    name: List WIPO FTP contents
+    name: Download + dump one daily zip
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
-      - name: Probe ftpird.wipo.int
+      - name: Fetch + analyze
+        env:
+          FNAME: ${{ github.event.inputs.filename || '20260421.zip' }}
         run: |
           python - <<'PY'
-          import ftplib, sys
+          import ftplib, io, os, sys, zipfile, xml.etree.ElementTree as ET
+          from collections import Counter
+
           HOST = "ftpird.wipo.int"
-          print(f"Connecting to {HOST}...", flush=True)
-          try:
-              ftp = ftplib.FTP(HOST, timeout=30)
+          DIR  = "/wipo/madrid/monitor"
+          FNAME = os.environ["FNAME"]
+
+          LATAM = {"AG","BR","BZ","CL","CO","CU","GD","JM","MX","TT"}
+          REFUSAL = {"RFNT","RFNP","FINC"}
+
+          def localname(tag):
+              return tag.split("}",1)[1] if "}" in tag else tag
+
+          print(f"Downloading {DIR}/{FNAME} ...", flush=True)
+          buf = io.BytesIO()
+          with ftplib.FTP(HOST, timeout=60) as ftp:
               ftp.login()
-          except Exception as e:
-              print(f"::error::Could not connect / login: {e}")
-              sys.exit(1)
-          def show(path):
-              print(f"\n===== {path} =====", flush=True)
+              ftp.cwd(DIR)
+              ftp.retrbinary(f"RETR {FNAME}", buf.write)
+          print(f"  {len(buf.getvalue()):,} bytes downloaded", flush=True)
+
+          zf = zipfile.ZipFile(io.BytesIO(buf.getvalue()))
+          xml_names = [n for n in zf.namelist() if n.lower().endswith(".xml")]
+          print(f"\nZip contains {len(zf.namelist())} entries ({len(xml_names)} XML)", flush=True)
+          for n in zf.namelist()[:20]:
+              print("  -", n)
+
+          txn_counter = Counter()
+          country_in_refusal = Counter()
+          sample_refusal_xml = None
+
+          for name in xml_names:
+              raw = zf.read(name)
               try:
-                  ftp.cwd(path)
-              except Exception as e:
-                  print(f"  (cwd failed: {e})")
-                  return
-              try:
-                  lines = []
-                  ftp.retrlines("LIST", lines.append)
-                  if not lines:
-                      print("  (empty)")
-                  for line in lines[-40:]:
-                      print("  " + line)
-              except Exception as e:
-                  print(f"  (LIST failed: {e})")
-          for p in [
-              "/", "/wipo", "/wipo/madrid", "/wipo/madrid/monitor",
-              "/wipo/madrid/monitor/2026", "/wipo/madrid/romarin",
-              "/madrid", "/madrid/monitor",
-          ]:
-              show(p)
-          ftp.quit()
-          print("\nDone.")
+                  root = ET.fromstring(raw)
+              except ET.ParseError as e:
+                  print(f"  skip {name}: parse error {e}")
+                  continue
+              for el in root.iter():
+                  tag = localname(el.tag).upper()
+                  if tag in REFUSAL:
+                      txn_counter[tag] += 1
+                      ccs = []
+                      for sub in el.iter():
+                          t = localname(sub.tag).upper()
+                          if "COUNTRY" in t and sub.text and len(sub.text.strip()) == 2:
+                              ccs.append(sub.text.strip().upper())
+                      for cc in ccs:
+                          country_in_refusal[cc] += 1
+                      if sample_refusal_xml is None:
+                          sample_refusal_xml = ET.tostring(el, encoding="unicode")[:3000]
+
+          print(f"\n=== Refusal transaction counts across all XMLs ===")
+          for k,v in txn_counter.most_common():
+              print(f"  {k}: {v}")
+
+          print(f"\n=== Country codes appearing inside refusal subtrees ===")
+          for k,v in country_in_refusal.most_common(30):
+              mark = " <-- LATAM" if k in LATAM else ""
+              print(f"  {k}: {v}{mark}")
+
+          latam_total = sum(v for k,v in country_in_refusal.items() if k in LATAM)
+          print(f"\nTotal refusals touching a LATAM country in this file: {latam_total}")
+
+          if sample_refusal_xml:
+              print("\n=== Sample refusal XML (first 3000 chars) ===")
+              print(sample_refusal_xml)
+          else:
+              print("\nNo refusal transactions (RFNT/RFNP/FINC) found in this zip.")
+              alltags = Counter()
+              for name in xml_names[:5]:
+                  for el in ET.fromstring(zf.read(name)).iter():
+                      alltags[localname(el.tag).upper()] += 1
+              print("\n=== Top 40 element tags across first 5 XMLs ===")
+              for k,v in alltags.most_common(40):
+                  print(f"  {k}: {v}")
           PY
