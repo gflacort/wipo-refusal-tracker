@@ -4,7 +4,7 @@ on:
   schedule:
     # Fridays at 10:00 UTC (day after the Gazette publishes on Thursdays)
     - cron: "0 10 * * 5"
-  # Lets you also run it on demand from the Actions tab
+  # Lets you run it manually from the Actions tab
   workflow_dispatch:
     inputs:
       days:
@@ -13,36 +13,61 @@ on:
         default: "7"
 
 jobs:
-  fetch:
-    name: Trigger Render /cron-run
+  fetch-and-push:
+    name: Fetch WIPO Gazette and push to Google Sheets
     runs-on: ubuntu-latest
+    timeout-minutes: 30
+
     steps:
-      - name: POST to the app
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Fetch from WIPO and append to Google Sheet
         env:
-          RENDER_URL: ${{ secrets.RENDER_URL }}
-          CRON_TOKEN: ${{ secrets.CRON_TOKEN }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SHEET_TAB: Refusals
           DAYS: ${{ github.event.inputs.days || '7' }}
         run: |
-          set -euo pipefail
-          if [ -z "${RENDER_URL:-}" ] || [ -z "${CRON_TOKEN:-}" ]; then
-            echo "Missing RENDER_URL or CRON_TOKEN secret — add them under Settings → Secrets → Actions."
-            exit 1
-          fi
+          python - <<'PY'
+          import os, sys
+          from parser import fetch_latest_refusals
+          from sheets import push_to_sheet
 
-          echo "Calling ${RENDER_URL}/cron-run?days=${DAYS}"
-          http_status=$(curl -sS -o response.json -w "%{http_code}" \
-            -X POST "${RENDER_URL}/cron-run?days=${DAYS}" \
-            -H "X-Cron-Token: ${CRON_TOKEN}" \
-            --max-time 300)
+          days = int(os.environ.get("DAYS", "7"))
+          print(f"Fetching last {days} day(s) from WIPO...", flush=True)
 
-          echo "HTTP status: ${http_status}"
-          echo "Response:"
-          cat response.json || true
-          echo
+          try:
+              rows, source = fetch_latest_refusals(days=days)
+          except Exception as exc:
+              print(f"::error::Fetch failed: {exc}")
+              sys.exit(1)
 
-          if [ "${http_status}" != "200" ]; then
-            echo "::error::cron-run failed (HTTP ${http_status})"
-            exit 1
-          fi
+          print(f"Got {len(rows)} refusal rows from: {source}", flush=True)
 
-          echo "::notice::Weekly WIPO fetch completed."
+          if not rows:
+              print("::notice::No matching refusals this week — nothing to push.")
+              sys.exit(0)
+
+          sheet_id = os.environ.get("GOOGLE_SHEET_ID")
+          if not sheet_id:
+              print("::error::GOOGLE_SHEET_ID secret not set on GitHub.")
+              sys.exit(1)
+
+          try:
+              appended = push_to_sheet(sheet_id, rows)
+          except Exception as exc:
+              print(f"::error::Sheet push failed: {exc}")
+              sys.exit(1)
+
+          print(f"::notice::Appended {appended} new rows to the Google Sheet ({len(rows) - appended} duplicates skipped).")
+          PY
