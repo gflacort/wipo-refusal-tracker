@@ -1,0 +1,48 @@
+name: Diagnose WIPO FTP
+
+on:
+  workflow_dispatch:
+
+jobs:
+  inspect:
+    name: List WIPO FTP contents
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Probe ftpird.wipo.int
+        run: |
+          python - <<'PY'
+          import ftplib, sys
+          HOST = "ftpird.wipo.int"
+          print(f"Connecting to {HOST}...", flush=True)
+          try:
+              ftp = ftplib.FTP(HOST, timeout=30)
+              ftp.login()
+          except Exception as e:
+              print(f"::error::Could not connect / login: {e}")
+              sys.exit(1)
+          def show(path):
+              print(f"\n===== {path} =====", flush=True)
+              try:
+                  ftp.cwd(path)
+              except Exception as e:
+                  print(f"  (cwd failed: {e})")
+                  return
+              try:
+                  lines = []
+                  ftp.retrlines("LIST", lines.append)
+                  if not lines:
+                      print("  (empty)")
+                  for line in lines[-40:]:
+                      print("  " + line)
+              except Exception as e:
+                  print(f"  (LIST failed: {e})")
+          for p in [
+              "/", "/wipo", "/wipo/madrid", "/wipo/madrid/monitor",
+              "/wipo/madrid/monitor/2026", "/wipo/madrid/romarin",
+              "/madrid", "/madrid/monitor",
+          ]:
+              show(p)
+          ftp.quit()
+          print("\nDone.")
+          PY
